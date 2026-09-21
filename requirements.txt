@@ -1,0 +1,5 @@
+streamlit
+yt-dlp
+openai-whisper
+edge-tts
+google-generativeai
