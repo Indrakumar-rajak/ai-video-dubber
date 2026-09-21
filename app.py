@@ -151,8 +151,8 @@ if st.button("🚀 Generate Final Video", type="primary", use_container_width=Tr
             status.info("📥 Video download ho rahi hai...")
             progress.progress(10)
             raw = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
-            run_cmd(f'yt-dlp -f "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b" '
-                    f'--merge-output-format mp4 -o "{raw}" "{video_url}"')
+            run_cmd(f'python -m yt_dlp -f "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b" '
+        f'--merge-output-format mp4 -o "{raw}" "{video_url}"')
             video_path = raw
 
         progress.progress(25)
