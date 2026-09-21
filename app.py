@@ -2,109 +2,215 @@ import streamlit as st
 import subprocess
 import os
 import asyncio
-import whisper
-import edge_tts
-import google.generativeai as genai
+import tempfile
+from pathlib import Path
 
-st.set_page_config(page_title="AI Video Dubber & Anti-Copyright", layout="wide")
-st.title("🎬 Anti-Copyright AI Video Dubber")
-st.write("Sirf video link daalein — AI automatically video edit karega aur Hindi Voice-over lagayega.")
+st.set_page_config(page_title="AI Video Studio", page_icon="🎬", layout="wide")
 
-# Sidebar Settings
-st.sidebar.header("⚙️ Anti-Copyright Filters")
-apply_flip = st.sidebar.checkbox("Mirror/Flip Video", value=True)
-zoom_percent = st.sidebar.slider("Slight Zoom (%)", min_value=3, max_value=10, value=5)
-speed_mult = st.sidebar.slider("Speed Boost (e.g., 1.04x)", min_value=1.01, max_value=1.10, value=1.04, step=0.01)
-contrast_boost = st.sidebar.slider("Contrast & Saturation Tweak", min_value=1.0, max_value=1.2, value=1.08, step=0.02)
+# -----------------------------
+# Helpers
+# -----------------------------
+def run_cmd(cmd):
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr[-4000:] or result.stdout[-4000:])
+    return result.stdout
 
-st.sidebar.header("🎙️ Voice Settings")
-voice_gender = st.sidebar.selectbox("Voice", ["Madhur (Male - Hindi)", "Swara (Female - Hindi)"])
-selected_voice = "hi-IN-MadhurNeural" if "Madhur" in voice_gender else "hi-IN-SwaraNeural"
+async def make_tts(text, voice, output):
+    import edge_tts
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(output)
 
-# Gemini API Key (Optional)
-gemini_key = st.sidebar.text_input("Gemini API Key (Optional for smart summary)", type="password")
+def get_duration(path):
+    out = run_cmd(
+        f'ffprobe -v error -show_entries format=duration '
+        f'-of default=noprint_wrappers=1:nokey=1 "{path}"'
+    )
+    return float(out.strip())
 
-# Main Interface
-video_url = st.text_input("🔗 Video ka Link yahan paste karein (YouTube, etc.):")
+def process_video(input_path, output_path, voiceover_path=None,
+                  zoom=0, speed=1.0, flip=False, brightness=0.0,
+                  contrast=1.0, saturation=1.0):
+    filters = []
 
-if st.button("🚀 Generate Copyright-Safe Hindi Video"):
-    if not video_url:
-        st.error("Kripya video ka valid link daalein!")
-    else:
-        status = st.status("Kaam chal raha hai...", expanded=True)
-        
-        # 1. Download Video using yt-dlp
-        status.write("📥 Step 1: Video download ho rahi hai...")
-        raw_video = "downloaded_video.mp4"
-        if os.path.exists(raw_video):
-            os.remove(raw_video)
-        
-        ydl_cmd = f'yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4" -o "{raw_video}" "{video_url}"'
-        subprocess.run(ydl_cmd, shell=True, check=True)
-        
-        # 2. Extract Audio & Transcribe
-        status.write("🎙️ Step 2: Audio se text nikala ja raha hai (Whisper AI)...")
-        model = whisper.load_model("base")
-        transcription = model.transcribe(raw_video)
-        original_text = transcription["text"]
-        
-        # 3. Translate & Create Script
-        status.write("📝 Step 3: Hindi script taiyar ho rahi hai...")
-        if gemini_key:
-            genai.configure(api_key=gemini_key)
-            gmodel = genai.GenerativeModel("gemini-1.5-flash")
-            prompt = f"Translate and rewrite the following video transcript into an engaging, natural Hindi YouTube voice-over narration:\n\n{original_text[:3000]}"
-            response = gmodel.generate_content(prompt)
-            hindi_script = response.text
-        else:
-            hindi_script = f"Doston, is video mein ek bohot hi dilchasp baat batayi gayi hai. {original_text[:500]}"
-
-        # 4. Generate Hindi Voice-over (Edge-TTS)
-        status.write("🔊 Step 4: Hindi Voice-over ban raha hai...")
-        tts_audio = "hindi_tts.mp3"
-        if os.path.exists(tts_audio):
-            os.remove(tts_audio)
-
-        async def make_tts():
-            tts = edge_tts.Communicate(hindi_script, selected_voice)
-            await tts.save(tts_audio)
-
-        asyncio.run(make_tts())
-
-        # 5. Apply Anti-Copyright Filters + Audio Merge (FFmpeg)
-        status.write("🎨 Step 5: Anti-Copyright Filters apply ho rahe hain...")
-        final_video = "final_output.mp4"
-        if os.path.exists(final_video):
-            os.remove(final_video)
-
-        crop_factor = 1.0 - (zoom_percent / 100.0)
-        vf_filters = [f"crop=in_w*{crop_factor}:in_h*{crop_factor},scale=1920:1080"]
-        if apply_flip:
-            vf_filters.append("hflip")
-        vf_filters.append(f"eq=contrast={contrast_boost}:brightness=0.02:saturation={contrast_boost}")
-        pts_speed = 1.0 / speed_mult
-        vf_filters.append(f"setpts={pts_speed:.4f}*PTS")
-
-        filter_string = ",".join(vf_filters)
-
-        ffmpeg_cmd = (
-            f'ffmpeg -y -i "{raw_video}" -i "{tts_audio}" '
-            f'-filter_complex "[0:v]{filter_string}[v]" '
-            f'-map "[v]" -map 1:a '
-            f'-c:v libx264 -preset fast -crf 22 -c:a aac -b:a 192k '
-            f'-shortest "{final_video}"'
+    if zoom > 0:
+        factor = max(0.80, 1.0 - zoom / 100.0)
+        filters.append(
+            f"crop=iw*{factor}:ih*{factor},scale=iw:ih"
         )
-        
-        subprocess.run(ffmpeg_cmd, shell=True, check=True)
-        status.update(label="✅ Video Successfully Generate Ho Gayi!", state="complete")
 
-        st.subheader("🎉 Final Edited Video (Copyright-Safe):")
-        st.video(final_video)
-        
-        with open(final_video, "rb") as file:
-            st.download_button(
-                label="📥 Download Edited Video",
-                data=file,
-                file_name="copyright_free_hindi_video.mp4",
-                mime="video/mp4"
-            )
+    if flip:
+        filters.append("hflip")
+
+    if contrast != 1.0 or saturation != 1.0 or brightness != 0:
+        filters.append(
+            f"eq=contrast={contrast}:brightness={brightness}:saturation={saturation}"
+        )
+
+    if speed != 1.0:
+        filters.append(f"setpts={1.0/speed:.6f}*PTS")
+
+    vf = ",".join(filters) if filters else "null"
+
+    if voiceover_path:
+        cmd = (
+            f'ffmpeg -y -i "{input_path}" -i "{voiceover_path}" '
+            f'-filter_complex "[0:v]{vf}[v]" '
+            f'-map "[v]" -map 1:a -c:v libx264 -preset medium -crf 23 '
+            f'-c:a aac -b:a 192k -shortest "{output_path}"'
+        )
+    else:
+        cmd = (
+            f'ffmpeg -y -i "{input_path}" '
+            f'-vf "{vf}" -c:v libx264 -preset medium -crf 23 '
+            f'-c:a aac -b:a 192k "{output_path}"'
+        )
+
+    run_cmd(cmd)
+
+# -----------------------------
+# UI
+# -----------------------------
+st.title("🎬 AI Video Studio")
+st.caption("Video Upload / Link → Hindi Voice-over → Edit → Preview → Download")
+
+tab1, tab2 = st.tabs(["📁 Upload Video", "🔗 Video Link"])
+
+video_path = None
+
+with tab1:
+    uploaded = st.file_uploader(
+        "Video upload karein",
+        type=["mp4", "mov", "mkv", "webm"]
+    )
+    if uploaded:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded.name).suffix)
+        tmp.write(uploaded.getbuffer())
+        tmp.close()
+        video_path = tmp.name
+        st.success(f"Video ready: {uploaded.name}")
+
+with tab2:
+    video_url = st.text_input("YouTube/video URL paste karein")
+    if video_url:
+        st.info("Link processing ke liye yt-dlp install hona zaroori hai.")
+
+st.divider()
+
+st.subheader("🎙️ Hindi Voice-over")
+
+voice = st.selectbox(
+    "Voice",
+    [
+        ("Madhur — Hindi Male", "hi-IN-MadhurNeural"),
+        ("Swara — Hindi Female", "hi-IN-SwaraNeural")
+    ],
+    format_func=lambda x: x[0]
+)
+
+voiceover_text = st.text_area(
+    "Hindi narration / voice-over script",
+    height=180,
+    placeholder="Yahan apni Hindi narration likhein..."
+)
+
+st.subheader("🎨 Video Editing")
+
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    zoom = st.slider("Zoom %", 0, 10, 0)
+with c2:
+    speed = st.slider("Speed", 0.90, 1.10, 1.00, 0.01)
+with c3:
+    flip = st.checkbox("Mirror / Flip", False)
+with c4:
+    contrast = st.slider("Contrast", 0.90, 1.20, 1.00, 0.01)
+
+c5, c6 = st.columns(2)
+with c5:
+    saturation = st.slider("Saturation", 0.80, 1.30, 1.00, 0.01)
+with c6:
+    brightness = st.slider("Brightness", -0.10, 0.10, 0.00, 0.01)
+
+st.divider()
+
+if "final_path" not in st.session_state:
+    st.session_state.final_path = None
+
+if st.button("🚀 Generate Final Video", type="primary", use_container_width=True):
+    if video_path is None and not video_url:
+        st.error("Pehle video upload karein ya video link dein.")
+        st.stop()
+
+    progress = st.progress(0)
+    status = st.empty()
+
+    try:
+        # Download URL if needed
+        if video_path is None and video_url:
+            status.info("📥 Video download ho rahi hai...")
+            progress.progress(10)
+            raw = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+            run_cmd(f'yt-dlp -f "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b" '
+                    f'--merge-output-format mp4 -o "{raw}" "{video_url}"')
+            video_path = raw
+
+        progress.progress(25)
+        status.info("🎙️ Voice-over prepare ho raha hai...")
+
+        voice_file = None
+        if voiceover_text.strip():
+            voice_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3").name
+            asyncio.run(make_tts(voiceover_text.strip(), voice[1], voice_file))
+
+        progress.progress(55)
+        status.info("🎨 Video render ho rahi hai...")
+
+        final_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+
+        process_video(
+            video_path,
+            final_file,
+            voiceover_path=voice_file,
+            zoom=zoom,
+            speed=speed,
+            flip=flip,
+            brightness=brightness,
+            contrast=contrast,
+            saturation=saturation
+        )
+
+        progress.progress(100)
+        status.success("✅ Final video ready!")
+        st.session_state.final_path = final_file
+
+    except Exception as e:
+        progress.empty()
+        st.error("Processing error:")
+        st.code(str(e))
+
+# -----------------------------
+# Preview / Download
+# -----------------------------
+if st.session_state.final_path and os.path.exists(st.session_state.final_path):
+    st.divider()
+    st.subheader("🎥 Preview")
+
+    st.video(st.session_state.final_path)
+
+    with open(st.session_state.final_path, "rb") as f:
+        st.download_button(
+            "📥 Download Final Video",
+            data=f,
+            file_name="final_video.mp4",
+            mime="video/mp4",
+            use_container_width=True
+        )
+
+    st.info(
+        "YouTube upload ko next step mein OAuth/API ke through connect kiya ja sakta hai. "
+        "Upload se pehle video ko private/unlisted rakhkar test karna safer hai."
+    )
+
+st.divider()
+st.caption("⚠️ Copyright note: editing effects copyright ownership ya Content ID claims ko automatically remove nahi karte. Sirf wahi content use karein jiske use ki permission/rights aapke paas hain.")
